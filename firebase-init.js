@@ -1,0 +1,327 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import {
+  initializeAppCheck,
+  ReCaptchaV3Provider,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app-check.js";
+import {
+  getAuth,
+  EmailAuthProvider,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  onAuthStateChanged,
+  reauthenticateWithCredential,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  signOut,
+  sendEmailVerification,
+  reload,
+  applyActionCode,
+  updatePassword,
+  updateProfile,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import {
+  getFunctions,
+  httpsCallable,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-functions.js";
+ import {
+  getFirestore,
+  collection,
+  collectionGroup,
+  addDoc,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  runTransaction,
+  serverTimestamp,
+  query,
+  where,
+  orderBy,
+  limit,
+  getDocs,
+  onSnapshot,
+  deleteDoc,
+  writeBatch,
+  arrayUnion,
+  increment,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytes,
+  getDownloadURL,
+  deleteObject,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-storage.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCUCzCtv4ynd117Ny_kKg7SDbn4QbtxwqI",
+  authDomain: "does-2c234.firebaseapp.com",
+  projectId: "does-2c234",
+  storageBucket: "does-2c234.firebasestorage.app",
+  messagingSenderId: "885708540637",
+  appId: "1:885708540637:web:4f0c51c97c0d07aba7e934",
+  measurementId: "G-3D8KT7BD8J",
+};
+
+function resolveRuntimeAuthDomain(defaultAuthDomain) {
+  if (typeof window === "undefined") return defaultAuthDomain;
+
+  const protocol = String(window.location?.protocol || "").trim().toLowerCase();
+  const host = String(window.location?.hostname || "").trim().toLowerCase();
+  if (!host) return defaultAuthDomain;
+  if (protocol !== "http:" && protocol !== "https:") return defaultAuthDomain;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".local")) {
+    return defaultAuthDomain;
+  }
+  // Keep Firebase-managed auth domain on custom-hosted frontends (e.g. GitHub Pages)
+  // to avoid redirect_uri_mismatch unless OAuth clients are explicitly configured
+  // with custom-domain /__/auth/handler redirect URIs.
+  if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) {
+    return host;
+  }
+  return defaultAuthDomain;
+}
+
+firebaseConfig.authDomain = resolveRuntimeAuthDomain(firebaseConfig.authDomain);
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const functions = getFunctions(app);
+const storage = getStorage(app);
+
+function shouldSkipAppCheckOnCurrentPage() {
+  if (typeof window === "undefined") return false;
+  const path = String(window.location?.pathname || "").toLowerCase();
+  const protocol = String(window.location?.protocol || "").toLowerCase();
+  const host = String(window.location?.hostname || "").toLowerCase();
+  const isLocalDevHost =
+    protocol === "file:" ||
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.endsWith(".local");
+  return (
+    isLocalDevHost ||
+    path.startsWith("/__/auth/")
+  );
+}
+
+function readAppCheckSiteKey() {
+  const meta = typeof document !== "undefined"
+    ? document.querySelector('meta[name="firebase-app-check-site-key"]')
+    : null;
+  const metaValue = meta?.getAttribute("content") || "";
+  const globalValue = typeof window !== "undefined" ? String(window.__DOMINO_APPCHECK_SITE_KEY || "") : "";
+  const picked = String(metaValue || globalValue || "").trim();
+  if (!picked || picked === "REPLACE_WITH_RECAPTCHA_V3_SITE_KEY") return "";
+  return picked;
+}
+
+function setupAppCheckDebugToken() {
+  if (typeof window === "undefined") return;
+  const debugToken = String(
+    window.__DOMINO_APPCHECK_DEBUG_TOKEN ||
+    window.localStorage?.getItem("domino_app_check_debug_token") ||
+    ""
+  ).trim();
+  if (!debugToken) return;
+  window.FIREBASE_APPCHECK_DEBUG_TOKEN = debugToken;
+}
+
+let appCheck = null;
+let appCheckBootstrapPromise = null;
+let appCheckBootstrapScheduled = false;
+const SITE_VISIT_SESSION_STORAGE_KEY = "dl_site_visit_session_v1";
+
+function initializeAppCheckWithKey(siteKey) {
+  const normalized = String(siteKey || "").trim();
+  if (!normalized || normalized === "REPLACE_WITH_RECAPTCHA_V3_SITE_KEY") return false;
+  if (appCheck) return true;
+  if (typeof document !== "undefined" && !document.body) return false;
+
+  try {
+    appCheck = initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(normalized),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch (error) {
+    const message = String(error?.message || "");
+    // reCAPTCHA can fail if the page is not fully ready yet; allow a deferred retry.
+    if (message.includes("placeholder element")) return false;
+    throw error;
+  }
+
+  if (typeof window !== "undefined") {
+    window.__DOMINO_APPCHECK_SITE_KEY = normalized;
+  }
+
+  return true;
+}
+
+async function bootstrapRemoteAppCheck() {
+  if (shouldSkipAppCheckOnCurrentPage()) return null;
+  if (appCheck || appCheckBootstrapPromise) return appCheckBootstrapPromise;
+
+  appCheckBootstrapPromise = (async () => {
+    try {
+      const callable = httpsCallable(functions, "getPublicRuntimeConfigSecure");
+      const response = await callable({});
+      const payload = response?.data && typeof response.data === "object" ? response.data : {};
+      const remoteSiteKey = String(payload.appCheckSiteKey || "").trim();
+      if (initializeAppCheckWithKey(remoteSiteKey)) return;
+    } catch (error) {
+      if (typeof console !== "undefined") {
+        console.warn("[APP_CHECK] config distante indisponible.", error);
+      }
+    }
+
+    if (typeof console !== "undefined" && !appCheck) {
+      console.warn("[APP_CHECK] firebase-app-check-site-key manquant; App Check web inactif.");
+    }
+  })();
+
+  return appCheckBootstrapPromise;
+}
+
+function initializeAppCheckSafely() {
+  if (shouldSkipAppCheckOnCurrentPage()) {
+    if (typeof console !== "undefined") {
+      console.info("[APP_CHECK] ignoré en environnement local/dev ou handler Firebase Auth.");
+    }
+    return;
+  }
+
+  setupAppCheckDebugToken();
+  const siteKey = readAppCheckSiteKey();
+  if (!initializeAppCheckWithKey(siteKey)) {
+    void bootstrapRemoteAppCheck();
+  }
+
+  if (!appCheck && !appCheckBootstrapScheduled && typeof document !== "undefined" && document.readyState === "loading") {
+    appCheckBootstrapScheduled = true;
+    document.addEventListener(
+      "DOMContentLoaded",
+      () => {
+        try {
+          initializeAppCheckSafely();
+        } catch (error) {
+          if (typeof console !== "undefined") {
+            console.warn("[APP_CHECK] initialisation différée échouée", error);
+          }
+        } finally {
+          appCheckBootstrapScheduled = false;
+        }
+      },
+      { once: true }
+    );
+  }
+}
+
+try {
+  initializeAppCheckSafely();
+} catch (error) {
+  if (typeof console !== "undefined") {
+    console.warn("[APP_CHECK] initialisation échouée", error);
+  }
+}
+
+function shouldSkipSiteVisitTracking() {
+  if (typeof window === "undefined") return true;
+  const protocol = String(window.location?.protocol || "").toLowerCase();
+  const host = String(window.location?.hostname || "").toLowerCase();
+  const path = String(window.location?.pathname || "").toLowerCase();
+  return (
+    protocol === "file:" ||
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.endsWith(".local") ||
+    path.startsWith("/__/auth/")
+  );
+}
+
+function getOrCreateSiteVisitSessionId() {
+  if (typeof window === "undefined") return "";
+  try {
+    const current = String(window.sessionStorage?.getItem(SITE_VISIT_SESSION_STORAGE_KEY) || "").trim();
+    if (current) return current;
+    const created = `visit_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    window.sessionStorage?.setItem(SITE_VISIT_SESSION_STORAGE_KEY, created);
+    return created;
+  } catch (_) {
+    return `visit_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+async function trackSiteVisitOncePerSession() {
+  if (shouldSkipSiteVisitTracking()) return;
+  const sessionId = getOrCreateSiteVisitSessionId();
+  if (!sessionId) return;
+  try {
+    const callable = httpsCallable(functions, "recordSiteVisitSecure");
+    await callable({
+      sessionId,
+      path: String(window.location?.pathname || "/"),
+      referrer: String(document?.referrer || ""),
+    });
+  } catch (error) {
+    if (typeof console !== "undefined") {
+      console.warn("[SITE_VISITS] tracking skipped", error);
+    }
+  }
+}
+
+void trackSiteVisitOncePerSession();
+
+export {
+  app,
+  appCheck,
+  auth,
+  db,
+  functions,
+  storage,
+  httpsCallable,
+  EmailAuthProvider,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  onAuthStateChanged,
+  reauthenticateWithCredential,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  signOut,
+  sendEmailVerification,
+  reload,
+  applyActionCode,
+  updatePassword,
+  updateProfile,
+  collection,
+  collectionGroup,
+  addDoc,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  runTransaction,
+  serverTimestamp,
+  query,
+  where,
+  orderBy,
+  limit,
+  getDocs,
+  onSnapshot,
+  deleteDoc,
+  writeBatch,
+  arrayUnion,
+  increment,
+  storageRef,
+  uploadBytes,
+  getDownloadURL,
+  deleteObject,
+};

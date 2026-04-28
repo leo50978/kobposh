@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Kobposh</title>
+    <meta http-equiv="refresh" content="0; url=./kobposh/index.html" />
+    <script>
+      (function redirectToKobposh() {
+        const target = new URL("./kobposh/index.html", window.location.href);
+        if (window.location.search) target.search = window.location.search;
+        if (window.location.hash) target.hash = window.location.hash;
+        window.location.replace(target.toString());
+      })();
+    </script>
+  </head>
+  <body>
+    <p>Redirection vers Kobposh...</p>
+  </body>
+</html>
